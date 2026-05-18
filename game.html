@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>2.5D 遊戲測試畫面</title>
+    <style>
+        body { margin: 0; background: #0a0a0c; color: #fff; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: 'Segoe UI', sans-serif; }
+        #ui { position: fixed; top: 20px; left: 20px; background: rgba(20,20,25,0.8); padding: 15px; border-radius: 8px; border: 1px solid #00ffcc; backdrop-filter: blur(5px); }
+        canvas { background: #000; border: 1px solid #333; box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+        .label { color: #00ffcc; font-weight: bold; margin-bottom: 5px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="label">遊戲進入畫面</div>
+        <div id="stats">載入關卡中...</div>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        window.onload = () => {
+            // 從 LocalStorage 抓取編輯器存入的資料
+            const rawData = localStorage.getItem('customLevelData');
+            if (!rawData) {
+                document.getElementById('stats').innerText = "❌ 找不到關卡資料，請回編輯器重新點擊測試。";
+                return;
+            }
+
+            const { world, obstacles } = JSON.parse(rawData);
+            document.getElementById('stats').innerText = `✅ 物件數量: ${obstacles.length} | 畫布: ${world.width}x${world.height}`;
+
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // 根據編輯器定義的尺寸設定畫布
+            canvas.width = world.width;
+            canvas.height = world.height;
+
+            // --- 遊戲邏輯與控制 ---
+            const player = {
+                x: world.x + 50,
+                y: world.y + 50,
+                radius: 10,
+                color: '#00ccff',
+                speed: 4
+            };
+
+            const keys = {};
+            window.onkeydown = (e) => keys[e.key.toLowerCase()] = true;
+            window.onkeyup = (e) => keys[e.key.toLowerCase()] = false;
+
+            function checkCollision(nx, ny) {
+                // 邊界檢查
+                if (nx - player.radius < world.x || nx + player.radius > world.x + world.width ||
+                    ny - player.radius < world.y || ny + player.radius > world.y + world.height) {
+                    return { hit: true };
+                }
+                // 物件碰撞
+                for (let obs of obstacles) {
+                    const cx = Math.max(obs.x, Math.min(nx, obs.x + obs.baseWidth));
+                    const cy = Math.max(obs.y, Math.min(ny, obs.y + obs.baseDepth));
+                    const dx = nx - cx, dy = ny - cy;
+                    if (dx*dx + dy*dy < player.radius * player.radius) {
+                        return { hit: true, type: obs.type };
+                    }
+                }
+                return { hit: false };
+            }
+
+            function update() {
+                let nx = player.x, ny = player.y;
+                if (keys['w'] || keys['arrowup']) ny -= player.speed;
+                if (keys['s'] || keys['arrowdown']) ny += player.speed;
+                if (keys['a'] || keys['arrowleft']) nx -= player.speed;
+                if (keys['d'] || keys['arrowright']) nx += player.speed;
+
+                const col = checkCollision(nx, ny);
+                if (!col.hit) {
+                    player.x = nx; player.y = ny;
+                } else if (col.type === 'lava') {
+                    player.x = world.x + 50; player.y = world.y + 50; // 踩到岩漿重置
+                }
+            }
+
+            function gameLoop() {
+                update();
+                draw();
+                requestAnimationFrame(gameLoop);
+            }
+
+            function draw() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                // 繪製背景與物件
+                obstacles.forEach(obs => {
+                    ctx.fillStyle = (obs.type === 'lava') ? '#ff3300' : (obs.color || '#777');
+                    const rx = obs.x - world.x;
+                    const ry = obs.y - world.y;
+                    ctx.fillRect(rx, ry, obs.baseWidth, obs.baseDepth);
+                });
+
+                // 繪製主角
+                ctx.beginPath();
+                ctx.arc(player.x - world.x, player.y - world.y, player.radius, 0, Math.PI * 2);
+                ctx.fillStyle = player.color;
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            gameLoop();
+        };
+    </script>
+</body>
+</html>
