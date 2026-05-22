@@ -578,7 +578,7 @@
                 ctx.strokeRect(r.x, r.y, r.w, r.h);
                 // 繪製四個角的小方塊
                 ctx.fillStyle = '#fff';
-                const sz = 14 / camera.zoom;
+                const sz = 7 / camera.zoom;
                 ctx.fillRect(r.x - sz/2, r.y - sz/2, sz, sz); // TL
                 ctx.fillRect(r.x + r.w - sz/2, r.y - sz/2, sz, sz); // TR
                 ctx.fillRect(r.x - sz/2, r.y + r.h - sz/2, sz, sz); // BL
@@ -634,7 +634,7 @@
 
         if (activeTool === 'edit' && selectedIndex !== -1) {
             const r = getProjectedRect(obstacles[selectedIndex], viewMode);
-            const sz = 14 / camera.zoom;
+            const sz = 5 / camera.zoom;
             const corners = [
                 {x: r.x, y: r.y},           // 0: TL
                 {x: r.x + r.w, y: r.y},     // 1: TR
