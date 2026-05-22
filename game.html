@@ -18,6 +18,7 @@
     <canvas id="gameCanvas"></canvas>
 
     <script>
+        console.log("simple game.html loaded, search=" + window.location.search);
         window.onload = () => {
             // 從 LocalStorage 抓取編輯器存入的資料
             const rawData = localStorage.getItem('customLevelData');
@@ -91,6 +92,14 @@
             function draw() {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 
+                // debug 資訊：在畫面上方顯示
+                ctx.fillStyle = 'yellow'; ctx.font = '12px monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+                const loc = window.location.search;
+                ctx.fillText('custom=' + loc.includes('custom=true') + ' obs=' + obstacles.length + ' game=simple', 4, 4);
+                obstacles.forEach((ob, i) => {
+                    ctx.fillText('[' + i + '] baseZ=' + (ob.baseZ ?? 'undef') + ' h=' + ob.baseHeight + ' d=' + ob.baseDepth, 4, 22 + i * 16);
+                });
+
                 // 繪製背景與物件
                 obstacles.forEach(obs => {
                     ctx.fillStyle = (obs.type === 'lava') ? '#ff3300' : (obs.color || '#777');
