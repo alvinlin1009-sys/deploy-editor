@@ -811,6 +811,14 @@
         });
     }
 
+    const PLAYER_HEIGHT = 30;
+    function validateObstacleHeight(baseZ, baseHeight) {
+        if (baseZ + baseHeight + PLAYER_HEIGHT > world.height) {
+            return { valid: false, reason: `障礙物最高點 (離地${baseZ}+高${baseHeight}) 加上主角高度 (${PLAYER_HEIGHT}) 不可超過地圖高 (${world.height})` };
+        }
+        return { valid: true };
+    }
+
     function updateSelected() {
         if (selectedIndex === -1) return;
         const obs = obstacles[selectedIndex];
@@ -824,6 +832,8 @@
         obs.baseZ = parseFloat(document.getElementById('obj-z').value) || 0;
         obs.color = document.getElementById('obj-color').value;
         obs.requireX = document.getElementById('obj-require-x').checked;
+        const hc = validateObstacleHeight(obs.baseZ, obs.baseHeight);
+        if (!hc.valid) { alert("⚠️ " + hc.reason); }
         updateUI();
     }
 
@@ -849,6 +859,10 @@
         input.click();
     }
     function testLevel() {
+        for (const obs of obstacles) {
+            const hc = validateObstacleHeight(obs.baseZ || 0, obs.baseHeight || 120);
+            if (!hc.valid) { alert("⚠️ 目前關卡無法測試：\n" + hc.reason + "\n請調整障礙物高度。"); return; }
+        }
         const levelData = JSON.stringify({ world, obstacles });
         localStorage.setItem('customLevelData', levelData);
         window.open('game.html?custom=true', '_blank');
