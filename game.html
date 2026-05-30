@@ -319,7 +319,9 @@
             coyoteTimer: 0, // 新增：土狼時間計時器
             tutorialJumped: false, // 教學：是否已跳躍
             isDying: false, // 新增：是否正在進行死亡動畫
-            deathAnimTimer: 0 // 新增：死亡動畫計時器
+            deathAnimTimer: 0, // 新增：死亡動畫計時器
+            underObstacle: null, // 側面模式下記錄在哪些障礙物下方
+            actualZ: 0 // 角色實際 Z 高度（跨視角追蹤）
         };
 
         let audioCtx = null; // 用於播放音效
@@ -366,7 +368,7 @@
         let isDimmed = false; // 對話框是否變淡 (嘗試操作中)
         let currentLevel = 0; // 當前關卡
         const maxLevel = 10; // 最大關卡
-        const lavaLevels = [5, 7, 9, 10]; // 哪些關卡有岩漿地板
+        const lavaLevels = [7, 9, 10]; // 哪些關卡有岩漿地板
         let isVictory = false; // 是否已通關
         let isChangingLevel = false; // 是否正在進行非同步換關載入
 
@@ -378,23 +380,7 @@
         async function generateObstacles() {
             if (currentLevel === -1) return; // 社群自訂關卡保持不變
 
-            // 優先嘗試從 Supabase 雲端讀取官方主線關卡
-            try {
-                await initSupabase();
-                if (supabaseClient && currentLevel > 0) {
-                    const { data, error } = await supabaseClient.from('official_levels').select('*').eq('level_num', currentLevel).single();
-                    if (!error && data && data.world && data.obstacles) {
-                        obstacles.length = 0;
-                        Object.assign(world, data.world);
-                        obstacles.push(...data.obstacles);
-                        if (viewInfo && !viewInfo.innerText.includes('遊玩')) {
-                            viewInfo.innerText = `目前視角：上帝視角 (按 E 切換) | 主線關卡：第 ${currentLevel} 關 - ${data.name}`;
-                        }
-                        return;
-                    }
-                }
-            } catch (e) { console.warn("讀取雲端主線失敗，降級使用內建預設關卡", e); }
-
+            // 1. 同步生成預設關卡（瞬間完成，避免網路請求造成的空窗期）
             obstacles.length = 0;
             const wx = world.x, wy = world.y, ww = world.width, wh = world.height;
 
@@ -534,9 +520,38 @@
                     player.standingOn = i;
                 }
             }
+
+            // 2. 非同步嘗試從 Supabase 雲端讀取（成功則覆蓋本地預設）
+            if (currentLevel > 0) {
+                try {
+                    await initSupabase();
+                    if (supabaseClient) {
+                        const { data, error } = await supabaseClient.from('official_levels').select('*').eq('level_num', currentLevel).single();
+                        if (!error && data && data.world && data.obstacles) {
+                            obstacles.length = 0;
+                            Object.assign(world, data.world);
+                            obstacles.push(...data.obstacles);
+                            if (viewInfo && !viewInfo.innerText.includes('遊玩')) {
+                                viewInfo.innerText = `目前視角：上帝視角 (按 E 切換) | 主線關卡：第 ${currentLevel} 關 - ${data.name}`;
+                            }
+                            // 重新檢查方塊是否站在障礙物上
+                            for (let i = 0; i < obstacles.length; i++) {
+                                let o = getObsRect(obstacles[i]);
+                                if (!o) continue;
+                                if (player.x < o.x + o.w && player.x + player.width > o.x &&
+                                    player.y < o.y + o.h && player.y + player.height > o.y) {
+                                    player.elevatedFromSide = true;
+                                    player.standingOn = i;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) { console.warn("讀取雲端主線失敗", e); }
+            }
         }
 
         // 3. 最後才執行初始化呼叫（自訂關卡由 initCustomLevel 負責）
+        let supabaseClient = null;
         if (!location.search.includes('custom=true')) {
             generateObstacles();
         }
@@ -545,6 +560,7 @@
             isStartScreen = false;
             const startScreen = document.getElementById('start-screen');
             startScreen.style.opacity = '0';
+            generateObstacles(); // 先產生障礙物
             setTimeout(() => {
                 startScreen.classList.add('hidden');
                 isDialogOpen = true;
@@ -559,16 +575,16 @@
             isStartScreen = false;
             const startScreen = document.getElementById('start-screen');
             startScreen.style.opacity = '0';
+            dialogOverlay.classList.add('hidden');
+            isDialogOpen = false;
+            if (currentLevel === -1) {
+                // 自訂關卡不改變 currentLevel
+            } else {
+                currentLevel = 1; // 直接進入第一關
+            }
+            setupLevelTransition();
             setTimeout(() => {
                 startScreen.classList.add('hidden');
-                dialogOverlay.classList.add('hidden');
-                isDialogOpen = false;
-                if (currentLevel === -1) {
-                    // 自訂關卡不改變 currentLevel
-                } else {
-                    currentLevel = 1; // 直接進入第一關
-                }
-                setupLevelTransition();
             }, 500);
         }
 
@@ -891,6 +907,8 @@
                 if (player.elevatedFromSide && player.standingOn !== null) {
                     const obs = obstacles[player.standingOn];
                     player.y = world.y + world.height - (obs.baseZ || 0) - obs.baseHeight - player.height;
+                } else if (player.elevatedFromSide && player.actualZ > 1) {
+                    player.y = world.y + world.height - player.actualZ - player.height;
                 } else {
                     player.y = world.y + world.height - player.height;
                 }
@@ -903,38 +921,39 @@
                 // 逆推 Z 軸位置 (Topdown 的 Y)
                 player.y = world.y + (world.height - sideRelX - player.width);
 
-                // 【修復】原本的攀附邏輯會誤將碰到箱子邊緣的玩家傳送到世界邊界，現在改為僅限世界邊界
-                if (player.touchingWallLeft || player.touchingWallRight) {
-                    // 檢查是否真的接近世界邊界 (左右各 5 像素內)
-                    const isAtWorldLeft = (viewMode === 'sideview' && oldX <= world.x + 5);
-                    const isAtWorldRight = (viewMode === 'sideview' && oldX + player.width >= world.x + world.height - 5);
-
-                    if (isAtWorldLeft || isAtWorldRight) {
-                        player.isClinging = true;
-                        player.clingSide = isAtWorldLeft ? 'bottom' : 'top';
-                        player.clingingX = player.x;
-                        player.clingingY = (player.clingSide === 'bottom') ? (world.y + world.height - player.height) : world.y;
-                        player.reboundX = 0;
-                    }
-                }
-
                 // 如果在側視圖時有高度，切換後標記為「站在箱子上」
                 if (heightAboveGround > 1) {
-                    player.elevatedFromSide = true;
-                    player.standingOn = null;
-                    // 【優化】重新掃描當前位置下方是哪個箱子，加入 2 像素的小誤差容許量
-                    for (let i = 0; i < obstacles.length; i++) {
-                        let o = getObsRect(obstacles[i]);
-                        if (o && player.x < o.x + o.w + 2 && player.x + player.width > o.x - 2 &&
-                            player.y < o.y + o.h + 2 && player.y + player.height > o.y - 2) {
-                            player.standingOn = i;
-                            break;
+                    // 貼牆跳躍時直接落地，避免傳送到錯誤位置
+                    if (oldX <= world.x + 5 || oldX + player.width >= world.x + world.height - 5) {
+                        player.elevatedFromSide = false;
+                        player.standingOn = null;
+                        player.actualZ = 0;
+                    } else {
+                        player.elevatedFromSide = true;
+                        player.standingOn = null;
+                        player.actualZ = heightAboveGround;
+                        // 找出同 X 軸上低於角色且最高的平台
+                        let bestIdx = null, bestTop = -1;
+                        for (let i = 0; i < obstacles.length; i++) {
+                            let o = getObsRect(obstacles[i]);
+                            const obsTop = (obstacles[i].baseZ || 0) + (obstacles[i].baseHeight || 120);
+                            if (o && obsTop <= heightAboveGround + 5 &&
+                                player.x < o.x + o.w + 2 && player.x + player.width > o.x - 2 &&
+                                obsTop > bestTop) {
+                                bestIdx = i;
+                                bestTop = obsTop;
+                            }
                         }
+                        if (bestIdx !== null) {
+                            player.standingOn = bestIdx;
+                            player.actualZ = bestTop;
+                        }
+                        if (player.standingOn === null) { player.elevatedFromSide = false; player.actualZ = 0; }
                     }
-                    if (player.standingOn === null) player.elevatedFromSide = false;
                 } else {
                     player.elevatedFromSide = false;
                     player.standingOn = null;
+                    player.actualZ = 0;
                 }
             }
 
@@ -970,7 +989,7 @@
 
 
         // 封裝關卡切換的初始化邏輯
-        async function setupLevelTransition() {
+        function setupLevelTransition() {
             isChangingLevel = true;
             // 先重置一些關鍵狀態
             player.standingOn = null;
@@ -978,7 +997,7 @@
             player.autoMove = null;
             player.vy = 0;
 
-            await generateObstacles();
+            generateObstacles(); // 同步生成本地關卡，雲端讀取背景執行
             viewMode = 'topdown';
             if (viewInfo && !viewInfo.innerText.includes('主線關卡')) {
                 viewInfo.innerText = `目前視角：上帝視角 (按 E 切換)`;
@@ -997,6 +1016,22 @@
             if (viewMode === 'topdown') {
                 player.x = startX;
                 player.y = startY;
+                // 若出生點有高度，在俯視模式下設定 elevated 狀態
+                if ((spRel.z || 0) > 1) {
+                    player.elevatedFromSide = true;
+                    player.actualZ = spRel.z;
+                    for (let i = 0; i < obstacles.length; i++) {
+                        let o = getObsRect(obstacles[i]);
+                        const obsTop = (obstacles[i].baseZ || 0) + (obstacles[i].baseHeight || 120);
+                        if (o && Math.abs(obsTop - spRel.z) < 5 &&
+                            player.x < o.x + o.w + 2 && player.x + player.width > o.x - 2 &&
+                            player.y < o.y + o.h + 2 && player.y + player.height > o.y - 2) {
+                            player.standingOn = i;
+                            player.onGround = true;
+                            break;
+                        }
+                    }
+                }
             } else {
                 // 在側面模式下，設定正確的 Z 軸視覺位置與鎖定位置 (X 軸)
                 player.lockedX = startX;
@@ -1005,25 +1040,23 @@
             }
 
             player.vy = 0;
-            player.elevatedFromSide = false;
-            player.standingOn = null;
 
-            // 立即尋找起點平台 (getObsRect 會根據目前的 viewMode 回傳矩形)
-            for (let i = 0; i < obstacles.length; i++) {
-                let o = getObsRect(obstacles[i]);
-                if (o && player.x < o.x + o.w && player.x + player.width > o.x &&
-                    player.y < o.y + o.h && player.y + player.height > o.y) {
-                    player.elevatedFromSide = true;
-                    player.standingOn = i;
-
-                    // 【關鍵修復】如果是在側面模式且踏在平台上，強制將高度設為平台頂端
-                    // 否則在岩漿關卡會因為碰到「地板」而立即觸發死亡循環
-                    if (viewMode === 'sideview') {
+            // 僅在側面模式檢查起點平台，避免俯視模式誤將角色視為站在障礙物上
+            if (viewMode === 'sideview') {
+                player.elevatedFromSide = false;
+                player.standingOn = null;
+                for (let i = 0; i < obstacles.length; i++) {
+                    let o = getObsRect(obstacles[i]);
+                    if (o && player.x < o.x + o.w && player.x + player.width > o.x &&
+                        player.y < o.y + o.h && player.y + player.height > o.y) {
+                        player.elevatedFromSide = true;
+                        player.standingOn = i;
+                        player.actualZ = (obstacles[i].baseZ || 0) + (obstacles[i].baseHeight || 120);
                         player.y = o.y - player.height;
                         player.onGround = true;
                         player.vy = 0;
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -1148,6 +1181,11 @@
                     player.vy = player.jumpPower;
                     player.onGround = false;
                     player.coyoteTimer = 0; // 觸發跳躍後立即歸零，防止二段跳
+                    // 跳躍時清除站立狀態，避免碰撞偵測誤判
+                    if (player.standingOn !== null) {
+                        player.actualZ = (obstacles[player.standingOn].baseZ || 0) + (obstacles[player.standingOn].baseHeight || 120);
+                        player.standingOn = null;
+                    }
                     // 教學特定邏輯：偵測跳躍 (已在上方處理)
                     player.lastWallSide = null;
                 } else if (player.touchingWallLeft && player.lastWallSide !== 'left') {
@@ -1208,6 +1246,12 @@
             if (keys['w'] || keys['W'] || keys['ArrowUp']) moveY = -1;
             if (keys['s'] || keys['S'] || keys['ArrowDown']) moveY = 1;
 
+            // 確保斜向移動速度與軸向一致（僅上帝模式，側面 Y 軸為跳躍）
+            if (viewMode === 'topdown' && moveX !== 0 && moveY !== 0) {
+                moveX *= 0.7071;
+                moveY *= 0.7071;
+            }
+
             if (moveX === 0 && moveY === 0 && player.autoMove) {
                 moveX = player.autoMove.x; moveY = player.autoMove.y;
             }
@@ -1222,6 +1266,11 @@
                     // 攀附時禁止 Y 軸輸入 (除非是為了脫離)，但允許 X 軸移動以便沿牆滑行
                     moveY = 0;
                 }
+            } else if (player.elevatedFromSide && viewMode === 'topdown' && player.standingOn === null && player.actualZ > 0 && (keys['s'] || keys['S'] || keys['ArrowDown'])) {
+                // 在空中按 S 可降落到地面
+                player.elevatedFromSide = false;
+                player.standingOn = null;
+                player.actualZ = 0;
             } else if (player.elevatedFromSide && viewMode === 'topdown' && player.standingOn !== null) {
                 // 上帝模式下站在障礙物上的釋放邏輯
                 const targetObs = obstacles[player.standingOn];
@@ -1232,43 +1281,52 @@
                         player.y + player.height < o.y || player.y > o.y + o.h;
 
                     if (isOutside) {
-                        // 尋找等高的相鄰/重疊平台
-                        let foundNewPlatform = false;
-                        const currentHeight = targetObs.baseHeight || 120;
+                        // 尋找下方重疊平台（允許走到較低相鄰障礙物上）
+                        let bestIdx = null;
+                        let bestTop = -Infinity;
+                        const currentZ = (targetObs.baseZ || 0) + (targetObs.baseHeight || 120);
                         for (let j = 0; j < obstacles.length; j++) {
                             if (j === player.standingOn) continue;
                             const otherObs = obstacles[j];
-                            const otherHeight = otherObs.baseHeight || 120;
-                            // 判斷高度是否相同 (容許誤差 1 像素)
-                            if (Math.abs(otherHeight - currentHeight) < 1) {
-                                // 獲取該障礙物的 topdown 矩形 (直接從屬性讀取，避免 getObsRect 因 mode 變化或 sideview 判定影響)
-                                const oOther = { 
-                                    x: otherObs.x, 
-                                    y: otherObs.y, 
-                                    w: otherObs.baseWidth, 
-                                    h: otherObs.baseDepth 
-                                };
-                                // 檢查玩家是否重疊該平台
-                                const overlaps = player.x + player.width > oOther.x && 
-                                                 player.x < oOther.x + oOther.w && 
-                                                 player.y + player.height > oOther.y && 
-                                                 player.y < oOther.y + oOther.h;
-                                if (overlaps) {
-                                    player.standingOn = j;
-                                    foundNewPlatform = true;
-                                    break;
-                                }
+                            if (otherObs.type === 'lava') continue;
+                            const otherTop = (otherObs.baseZ || 0) + (otherObs.baseHeight || 120);
+                            if (otherTop > currentZ) continue; // 不往上爬
+                            const oOther = { 
+                                x: otherObs.x, 
+                                y: otherObs.y, 
+                                w: otherObs.baseWidth, 
+                                h: otherObs.baseDepth 
+                            };
+                            const overlaps = player.x + player.width > oOther.x && 
+                                             player.x < oOther.x + oOther.w && 
+                                             player.y + player.height > oOther.y && 
+                                             player.y < oOther.y + oOther.h;
+                            if (overlaps && otherTop > bestTop) {
+                                bestTop = otherTop;
+                                bestIdx = j;
                             }
                         }
-                        if (!foundNewPlatform) {
+                        if (bestIdx !== null) {
+                            player.standingOn = bestIdx;
+                            // 若新平台較低，將玩家推出舊障礙物範圍，避免碰撞
+                            const newTop = (obstacles[bestIdx].baseZ || 0) + (obstacles[bestIdx].baseHeight || 120);
+                            if (newTop < currentZ) {
+                                if (player.x + player.width > o.x + o.w) player.x = o.x + o.w;
+                                else if (player.x < o.x) player.x = o.x - player.width;
+                                if (player.y + player.height > o.y + o.h) player.y = o.y + o.h;
+                                else if (player.y < o.y) player.y = o.y - player.height;
+                            }
+                        } else {
                             player.elevatedFromSide = false;
                             player.standingOn = null;
+                            player.actualZ = 0;
                             player.autoMove = null;
                         }
                     }
                 } else {
                     player.elevatedFromSide = false;
                     player.standingOn = null;
+                    player.actualZ = 0;
                 }
             }
 
@@ -1284,7 +1342,8 @@
                 } else if (player.isCrouching) {
                     let canStand = true;
                     const py = player.y - (player.baseHeight * 0.4);
-                    for (const obs of obstacles) {
+            const sortedObs = [...obstacles].sort((a, b) => (a.baseZ || 0) - (b.baseZ || 0));
+            for (const obs of sortedObs) {
                         let o = getObsRect(obs);
                         if (!o) continue;
                         if (player.x < o.x + o.w && player.x + player.width > o.x && py < o.y + o.h && py + player.baseHeight > o.y) canStand = false;
@@ -1310,15 +1369,18 @@
                 if (viewMode === 'topdown' && player.elevatedFromSide && i === player.standingOn) {
                     continue;
                 }
-                // 如果玩家在上帝模式且在高台上，若目標障礙物高度與當前平台相同，則忽略碰撞阻擋
+                // 如果玩家在上帝模式且在高台上，若目標障礙物頂端高度與當前平台相同，則忽略碰撞阻擋
                 if (viewMode === 'topdown' && player.elevatedFromSide && player.standingOn !== null) {
-                    const currentHeight = obstacles[player.standingOn].baseHeight || 120;
-                    const otherHeight = obstacles[i].baseHeight || 120;
-                    if (Math.abs(otherHeight - currentHeight) < 1) {
+                    const currentTop = (obstacles[player.standingOn].baseZ || 0) + (obstacles[player.standingOn].baseHeight || 120);
+                    const otherTop = (obstacles[i].baseZ || 0) + (obstacles[i].baseHeight || 120);
+                    if (Math.abs(otherTop - currentTop) < 5) {
                         continue;
                     }
                 }
+                // 若障礙物懸空且高於角色頭頂，上帝模式可從下方穿過；或障礙物完全低於角色時也可穿過；或在平台上時低於平台的岩漿不阻擋
+                if (viewMode === 'topdown' && ((obstacles[i].baseZ || 0) > playerZ || (obstacles[i].baseZ || 0) + (obstacles[i].baseHeight || 120) < playerZ || (obstacles[i].type === 'lava' && player.elevatedFromSide && (obstacles[i].baseZ || 0) < playerZ))) continue;
                 if (player.x < o.x + o.w && player.x + player.width > o.x && oldPlayerY < o.y + o.h && oldPlayerY + oldPlayerHeight > o.y) {
+                    if (obstacles[i].type === 'lava' && (viewMode !== 'topdown' || !player.elevatedFromSide || (obstacles[i].baseZ || 0) >= playerZ)) { playerDie(); return; }
                     if (oldPlayerX + player.width <= o.x) { player.x = o.x - player.width; player.touchingWallRight = true; }
                     else { player.x = o.x + o.w; player.touchingWallLeft = true; }
                 }
@@ -1333,19 +1395,34 @@
                 let o = getObsRect(obstacles[i]);
                 if (!o) continue;
                 if (viewMode === 'topdown' && player.elevatedFromSide && i === player.standingOn) continue;
-                // 如果玩家在上帝模式且在高台上，若目標障礙物高度與當前平台相同，則忽略碰撞阻擋
                 if (viewMode === 'topdown' && player.elevatedFromSide && player.standingOn !== null) {
-                    const currentHeight = obstacles[player.standingOn].baseHeight || 120;
-                    const otherHeight = obstacles[i].baseHeight || 120;
-                    if (Math.abs(otherHeight - currentHeight) < 1) {
+                    const currentTop = (obstacles[player.standingOn].baseZ || 0) + (obstacles[player.standingOn].baseHeight || 120);
+                    const otherTop = (obstacles[i].baseZ || 0) + (obstacles[i].baseHeight || 120);
+                    if (Math.abs(otherTop - currentTop) < 5) {
                         continue;
                     }
                 }
+                // 若障礙物懸空且高於角色頭頂，上帝模式可從下方穿過；或在平台上時低於平台的岩漿不阻擋
+                if (viewMode === 'topdown' && ((obstacles[i].baseZ || 0) > playerZ || (obstacles[i].baseZ || 0) + (obstacles[i].baseHeight || 120) < playerZ || (obstacles[i].type === 'lava' && player.elevatedFromSide && (obstacles[i].baseZ || 0) < playerZ))) continue;
                 if (player.y < o.y + o.h && player.y + player.height > o.y && player.x < o.x + o.w && player.x + player.width > o.x) {
+                    if (obstacles[i].type === 'lava' && (viewMode !== 'topdown' || !player.elevatedFromSide || (obstacles[i].baseZ || 0) >= playerZ)) { playerDie(); return; }
                     if (viewMode === 'topdown') player.y = (oldPlayerY + oldPlayerHeight <= o.y) ? o.y - player.height : o.y + o.h;
                     else {
                         if (oldPlayerY + oldPlayerHeight <= o.y) { player.y = o.y - player.height; player.vy = 0; player.onGround = true; }
                         else if (oldPlayerY >= o.y + o.h - 5) { player.y = o.y + o.h; player.vy = 0; }
+                    }
+                }
+            }
+
+            // 側面視角：若走出站立障礙物的水平範圍，清除站立狀態
+            if (viewMode === 'sideview' && player.elevatedFromSide && player.standingOn !== null) {
+                const obs = obstacles[player.standingOn];
+                if (obs) {
+                    const obsLeft = world.x + world.height - (obs.y - world.y) - obs.baseDepth;
+                    const obsRight = obsLeft + obs.baseDepth;
+                    if (player.x + player.width <= obsLeft || player.x >= obsRight) {
+                        player.actualZ = (obs.baseZ || 0) + (obs.baseHeight || 120);
+                        player.standingOn = null;
                     }
                 }
             }
@@ -1356,7 +1433,7 @@
             if (player.y + player.height > world.y + world.height) { player.y = world.y + world.height - player.height; if (viewMode === 'sideview') player.onGround = true; }
 
             // 【關鍵鎖定】在上帝模式下，不再強制限制座標在障礙物範圍內 (已改為自由走動脫離)
-            if (player.elevatedFromSide && viewMode === 'topdown' && player.standingOn === null) {
+            if (player.elevatedFromSide && viewMode === 'topdown' && player.standingOn === null && !player.actualZ) {
                 player.elevatedFromSide = false;
             }
 
@@ -1375,6 +1452,31 @@
                 }
             }
             if (player.onGround) player.lastWallSide = null;
+
+            // 偵測角色是否在障礙物下方（跨影格保留，用於上帝模式虛線框）
+            if (viewMode === 'sideview') {
+                player.underObstacle = null;
+                for (const obs of obstacles) {
+                    if (obs.type !== 'lava') {
+                        let o = getObsRect(obs);
+                        if (o && player.x < o.x + o.w && player.x + player.width > o.x &&
+                            player.y + player.height <= o.y) {
+                            player.underObstacle = obs;
+                            break;
+                        }
+                    }
+                }
+            } else if (viewMode === 'topdown') {
+                player.underObstacle = null;
+                for (const obs of obstacles) {
+                    if (obs.type !== 'lava' && (obs.baseZ || 0) > (player.actualZ || playerZ || 0) &&
+                        player.x < obs.x + obs.baseWidth && player.x + player.width > obs.x &&
+                        player.y < obs.y + obs.baseDepth && player.y + player.height > obs.y) {
+                        player.underObstacle = obs;
+                        break;
+                    }
+                }
+            }
         }
 
         // 繪製畫面
@@ -1511,7 +1613,10 @@
                 }
             }
 
-            for (const obs of obstacles) {
+            const sortedObs = mode === 'topdown'
+                ? [...obstacles].sort((a, b) => (a.baseZ || 0) - (b.baseZ || 0))
+                : obstacles;
+            for (const obs of sortedObs) {
                 let o = getVisualRectForMode(obs, mode, currentLockedX);
                 if (!o || o.x === undefined) continue;
                 
@@ -1593,7 +1698,18 @@
                 ctx.fillText("!", pPos.x + player.width / 2, pPos.y - 10);
                 ctx.restore();
             } else {
-                ctx.fillRect(pPos.x, pPos.y, player.width, player.height);
+                // 上帝模式下若角色在障礙物下方，只畫虛線框不填滿
+                if (mode === 'topdown' && player.underObstacle) {
+                    ctx.save();
+                    ctx.strokeStyle = player.color;
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([6, 4]);
+                    ctx.shadowBlur = 0;
+                    ctx.strokeRect(pPos.x, pPos.y, player.width, player.height);
+                    ctx.restore();
+                } else {
+                    ctx.fillRect(pPos.x, pPos.y, player.width, player.height);
+                }
             }
             ctx.shadowBlur = 0;
         }
@@ -1625,7 +1741,6 @@
         // ==========================================
         // ☁️ Supabase 雲端社群關卡大廳 (支援 Vercel 環境變數 API)
         // ==========================================
-        let supabaseClient = null;
         async function initSupabase() {
             if (supabaseClient) return true;
 
